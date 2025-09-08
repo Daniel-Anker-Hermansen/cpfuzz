@@ -1,7 +1,7 @@
 use std::{
 	collections::HashMap,
 	io::{self, Read as _, Write},
-	process::{ChildStdin, ChildStdout, Command, Stdio},
+	process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
 use clap::Parser as _;
@@ -46,7 +46,7 @@ impl Language {
 		Ok(exit_code.success())
 	}
 
-	fn run_interactee(self, problem: &str) -> io::Result<(ChildStdin, ChildStdout)> {
+	fn run_interactee(self, problem: &str) -> io::Result<(ChildStdin, ChildStdout, Child)> {
 		let path = match self {
 			Language::Rust => &format!("target/release/{problem}"),
 			Language::RustDebug => &format!("target/release/{problem}"),
@@ -59,7 +59,7 @@ impl Language {
 			.spawn()?;
 		let stdin = child.stdin.take().expect("is piped");
 		let stdout = child.stdout.take().expect("is piped");
-		Ok((stdin, stdout))
+		Ok((stdin, stdout, child))
 	}
 
 	fn run_interacter(
@@ -68,6 +68,7 @@ impl Language {
 		input: &[u8],
 		mut child_stdin: ChildStdin,
 		mut child_stdout: ChildStdout,
+		mut interactee: Child,
 	) -> io::Result<bool> {
 		let path = match self {
 			Language::Rust => &format!("target/release/{problem}"),
@@ -107,7 +108,8 @@ impl Language {
 		child_in.join().expect("does not panic")?;
 		child_out.join().expect("does not panic")?;
 		let exit_code = child.wait()?;
-		Ok(exit_code.success())
+		let interactee_exit_code = interactee.wait()?;
+		Ok(exit_code.success() && interactee_exit_code.success())
 	}
 }
 
@@ -392,9 +394,9 @@ fn main() -> Result<(), Error> {
 		std::io::stderr().flush()?;
 		let stdin = generator.generate()?;
 		let result = if let Some(interactor) = &interactor {
-			let (child_stdin, child_stdout) = args.language.run_interactee(&args.problem)?;
+			let (child_stdin, child_stdout, child) = args.language.run_interactee(&args.problem)?;
 			args.language
-				.run_interacter(interactor, &stdin, child_stdin, child_stdout)?
+				.run_interacter(interactor, &stdin, child_stdin, child_stdout, child)?
 		} else {
 			args.language.run(&args.problem, &stdin)?
 		};
