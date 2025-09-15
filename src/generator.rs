@@ -1,132 +1,235 @@
-use std::{
-	alloc::{self, Layout},
-	io::Write as _,
-};
+use std::{collections::HashMap, io::Write as _, process::{Command, Stdio}};
 
-struct Allocation {
-	ptr: *mut u8,
-	layout: Layout,
+use crate::{args, error::{Error, SpecificationError}, generator_bindings::{Context, ContextState}};
+
+enum Numeric {
+	Integer(i64),
+	Variable(String),
 }
 
-impl Allocation {
-	fn new<T>(length: usize) -> Allocation {
-		unsafe {
-			let layout = Layout::array::<T>(length).unwrap();
-			let ptr = alloc::alloc(layout);
-			Allocation { ptr, layout }
-		}
-	}
-
-	unsafe fn write<T>(&mut self, index: usize, value: T) {
-		unsafe {
-			self.ptr.cast::<T>().add(index).write(value);
-		}
-	}
-
-	fn as_ptr<T>(&mut self) -> *const T {
-		self.ptr.cast()
-	}
-}
-
-impl Drop for Allocation {
-	fn drop(&mut self) {
-		unsafe {
-			alloc::dealloc(self.ptr, self.layout);
+impl Numeric {
+	fn evaluate(&self, store: &HashMap<&str, i64>) -> Result<i64, SpecificationError> {
+		match self {
+			Numeric::Integer(x) => Ok(*x),
+			Numeric::Variable(x) => store
+				.get(x.as_str())
+				.copied()
+				.ok_or(SpecificationError::Any),
 		}
 	}
 }
 
-pub struct ContextState {
-	stdin: Vec<u8>,
-	allocations: Vec<Allocation>,
+enum SpecificationAtom {
+	Integer {
+		lower: Numeric,
+		higher: Numeric,
+		name: String,
+	},
+	Array {
+		length: Numeric,
+		lower: Numeric,
+		higher: Numeric,
+		_name: String,
+	},
+	Permuation {
+		length: Numeric,
+		_name: String,
+	},
+	NewLine,
 }
 
-impl ContextState {
-	pub fn new() -> ContextState {
-		ContextState {
-			stdin: Vec::new(),
-			allocations: Vec::new(),
+pub struct Specification {
+	atoms: Vec<SpecificationAtom>,
+}
+
+
+fn read_name<'a>(iter: &mut impl Iterator<Item = &'a str>) -> Result<String, SpecificationError> {
+	iter.next()
+		.ok_or(SpecificationError::Any)
+		.map(str::to_string)
+}
+
+fn read_numeric<'a>(
+	iter: &mut impl Iterator<Item = &'a str>,
+) -> Result<Numeric, SpecificationError> {
+	iter.next().ok_or(SpecificationError::Any).map(|s| {
+		s.parse()
+			.map(Numeric::Integer)
+			.unwrap_or(Numeric::Variable(s.to_string()))
+	})
+}
+
+impl Specification {
+	fn parse(src: &str) -> Result<Specification, SpecificationError> {
+		Ok(Specification {
+			atoms: src.lines().try_fold(Vec::new(), |mut acc, line| {
+				let mut tokens = line.split_ascii_whitespace();
+				if !acc.is_empty() {
+					acc.push(SpecificationAtom::NewLine);
+				}
+				while let Some(ty) = tokens.next() {
+					match ty {
+						"int" => {
+							let name = read_name(&mut tokens)?;
+							let lower = read_numeric(&mut tokens)?;
+							let higher = read_numeric(&mut tokens)?;
+							acc.push(SpecificationAtom::Integer {
+								lower,
+								higher,
+								name,
+							});
+						}
+						"arr" => {
+							let name = read_name(&mut tokens)?;
+							let length = read_numeric(&mut tokens)?;
+							let lower = read_numeric(&mut tokens)?;
+							let higher = read_numeric(&mut tokens)?;
+							acc.push(SpecificationAtom::Array {
+								length,
+								lower,
+								higher,
+								_name: name,
+							});
+						}
+						"perm" => {
+							let name = read_name(&mut tokens)?;
+							let length = read_numeric(&mut tokens)?;
+							acc.push(SpecificationAtom::Permuation {
+								length,
+								_name: name,
+							});
+						}
+						_ => return Err(SpecificationError::Any),
+					}
+				}
+				Ok(acc)
+			})?,
+		})
+	}
+
+	fn generate(&self) -> Result<Vec<u8>, SpecificationError> {
+		let mut store = HashMap::new();
+		let mut stdin = Vec::new();
+		for atom in &self.atoms {
+			match atom {
+				SpecificationAtom::Integer {
+					lower,
+					higher,
+					name,
+				} => {
+					let lower = lower.evaluate(&store)?;
+					let higher = higher.evaluate(&store)?;
+					if higher < lower {
+						return Err(SpecificationError::Any);
+					}
+					let val = fastrand::i64(lower..=higher);
+					store.insert(name, val);
+					write!(&mut stdin, "{val} ").expect("write to memory");
+				}
+				SpecificationAtom::Array {
+					length,
+					lower,
+					higher,
+					..
+				} => {
+					let length = length.evaluate(&store)?;
+					if length < 0 {
+						return Err(SpecificationError::Any);
+					}
+					let lower = lower.evaluate(&store)?;
+					let higher = higher.evaluate(&store)?;
+					for _ in 0..length {
+						let val = fastrand::i64(lower..=higher);
+						write!(&mut stdin, "{val} ").expect("write to memory");
+					}
+				}
+				SpecificationAtom::Permuation { length, .. } => {
+					let length = length.evaluate(&store)?;
+					if length < 0 {
+						return Err(SpecificationError::Any);
+					}
+					let mut perm: Vec<i64> = (1..=length).collect();
+					fastrand::shuffle(&mut perm);
+					for val in perm {
+						write!(&mut stdin, "{val} ").expect("write to memory");
+					}
+				}
+				SpecificationAtom::NewLine => stdin.push(b'\n'),
+			}
 		}
+		Ok(stdin)
 	}
+}
 
-	fn new_line(&mut self) {
-		let _ = writeln!(&mut self.stdin);
-	}
+pub enum Generator {
+	Specification(Specification),
+	Library {
+		#[allow(dead_code)] // must be kept alive for function pointer to be safe.
+		library: libloading::Library,
+		generator: unsafe fn(&mut Context),
+	},
+}
 
-	fn i64(&mut self, lower: i64, higher: i64) -> i64 {
-		let res = fastrand::i64(lower..=higher);
-		let _ = write!(&mut self.stdin, "{} ", res);
-		res
-	}
-
-	fn i64_array(&mut self, length: usize, lower: i64, higher: i64) -> *const i64 {
-		let mut allocation = Allocation::new::<i64>(length);
-		for i in 0..length {
-			let res = fastrand::i64(lower..=higher);
-			let _ = write!(&mut self.stdin, "{} ", res);
+impl Generator {
+	pub fn new(args: &args::Args) -> Result<Generator, Error> {
+		if args.generate {
 			unsafe {
-				allocation.write(i, res);
+				let mut gcc = Command::new("g++")
+					.args([
+						&format!("{}.cpp", args.specification),
+						"-x",
+						"c",
+						"-shared",
+						"-o",
+						"__cpfuzz_gen.so",
+						"-",
+					])
+					.stdin(Stdio::piped())
+					.spawn()?;
+				write!(
+					&mut gcc.stdin.as_mut().unwrap(),
+					"{}",
+					include_str!("cpfuzz.c")
+				)?;
+				let exit_code = gcc.wait()?;
+				if !exit_code.success() {
+					std::process::exit(exit_code.code().unwrap_or(1));
+				}
+				let library = libloading::Library::new("./__cpfuzz_gen.so").unwrap();
+				let generator: unsafe fn(&mut Context) = std::mem::transmute(
+					library
+						.get::<unsafe fn(&Context)>(b"generate\0")
+						.unwrap()
+						.into_raw()
+						.into_raw(),
+				);
+				Ok(Generator::Library { library, generator })
+			}
+		} else {
+			let src = std::fs::read_to_string(&args.specification)?;
+			Ok(Generator::Specification(Specification::parse(&src)?))
+		}
+	}
+
+	pub fn generate(&self) -> Result<Vec<u8>, Error> {
+		match self {
+			Generator::Specification(specification) => specification.generate().map_err(Into::into),
+			Generator::Library { generator, .. } => {
+				let mut state = ContextState::new();
+				let mut context = Context::new(&mut state);
+				unsafe {
+					generator(&mut context);
+				}
+				Ok(state.into_stdin())
 			}
 		}
-		let ret = allocation.as_ptr();
-		self.allocations.push(allocation);
-		ret
 	}
+}
 
-	fn ascii(&mut self, ascii: *const u8) {
-		for i in 0.. {
-			let res = unsafe { ascii.add(i).read() };
-			if res == 0 {
-				break;
-			}
-			self.stdin.push(res);
+impl Drop for Generator {
+	fn drop(&mut self) {
+		if matches!(self, Generator::Library { .. }) {
+			let _ = std::fs::remove_file("./__cpfuzz_gen.so");
 		}
 	}
-
-	pub fn into_stdin(self) -> Vec<u8> {
-		self.stdin
-	}
-}
-
-#[repr(C)]
-pub struct Context<'ctx> {
-	gen_new_line: extern "C" fn(&mut ContextState),
-	gen_i64: extern "C" fn(&mut ContextState, i64, i64) -> i64,
-	gen_i64_array: extern "C" fn(&mut ContextState, usize, i64, i64) -> *const i64,
-	gen_ascii: extern "C" fn(&mut ContextState, *const u8),
-	context_state: &'ctx mut ContextState,
-}
-
-impl<'ctx> Context<'ctx> {
-	pub fn new(context_state: &'ctx mut ContextState) -> Context<'ctx> {
-		Context {
-			gen_new_line,
-			gen_i64,
-			gen_i64_array,
-			gen_ascii,
-			context_state,
-		}
-	}
-}
-
-extern "C" fn gen_new_line(context_state: &mut ContextState) {
-	context_state.new_line();
-}
-
-extern "C" fn gen_i64(context_state: &mut ContextState, lower: i64, higher: i64) -> i64 {
-	context_state.i64(lower, higher)
-}
-
-extern "C" fn gen_i64_array(
-	context_state: &mut ContextState,
-	length: usize,
-	lower: i64,
-	higher: i64,
-) -> *const i64 {
-	context_state.i64_array(length, lower, higher)
-}
-
-extern "C" fn gen_ascii(context_state: &mut ContextState, ascii: *const u8) {
-	context_state.ascii(ascii);
-
 }
