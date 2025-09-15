@@ -30,7 +30,7 @@ impl Language {
 		Ok(())
 	}
 
-	fn run(self, problem: &str, input: &[u8]) -> io::Result<bool> {
+	fn run(self, problem: &str, input: &[u8]) -> io::Result<(bool, String)> {
 		let path = match self {
 			Language::Rust => &format!("target/release/{problem}"),
 			Language::RustDebug => &format!("target/release/{problem}"),
@@ -38,12 +38,21 @@ impl Language {
 		};
 		let mut child = Command::new(path)
 			.stdin(Stdio::piped())
-			.stdout(Stdio::null())
+			.stdout(Stdio::piped())
 			.stderr(Stdio::null())
 			.spawn()?;
 		child.stdin.as_mut().expect("is piped").write_all(input)?;
+		let mut stdout = Vec::new();
+		child
+			.stdout
+			.as_mut()
+			.expect("is piped")
+			.read_to_end(&mut stdout)?;
 		let exit_code = child.wait()?;
-		Ok(exit_code.success())
+		Ok((
+			exit_code.success(),
+			String::from_utf8_lossy(&stdout).into_owned(),
+		))
 	}
 
 	fn run_interactee(self, problem: &str) -> io::Result<(ChildStdin, ChildStdout, Child)> {
@@ -279,14 +288,17 @@ impl Specification {
 #[derive(clap::Parser, Debug)]
 struct Args {
 	language: Language,
-	problem: String,
+	name: String,
 	specification: String,
 
 	#[arg(short, long)]
 	generate: bool,
 
-	#[arg(short, long)]
+	#[arg(short, long, value_name = "INTERACTOR")]
 	interactive: Option<String>,
+
+	#[arg(short, long, value_name = "COMPARATOR", conflicts_with("interactive"))]
+	compare: Option<String>,
 }
 
 #[derive(Debug)]
@@ -321,9 +333,9 @@ impl Generator {
 	fn new(args: &Args) -> Result<Generator, Error> {
 		if args.generate {
 			unsafe {
-				let mut gcc = Command::new("gcc")
+				let mut gcc = Command::new("g++")
 					.args([
-						&format!("{}.c", args.specification),
+						&format!("{}.cpp", args.specification),
 						"-x",
 						"c",
 						"-shared",
@@ -383,22 +395,44 @@ impl Drop for Generator {
 
 fn main() -> Result<(), Error> {
 	let args = Args::parse();
-	args.language.build(&args.problem)?;
+	args.language.build(&args.name)?;
 	let generator = Generator::new(&args)?;
-	let interactor = args.interactive.clone();
-	if let Some(interactor) = &interactor {
+	if let Some(interactor) = args.interactive.as_ref() {
 		args.language.build(interactor)?;
+	}
+	if let Some(name) = args.compare.as_ref() {
+		args.language.build(name)?;
 	}
 	for _ in 1u64.. {
 		eprint!(".");
 		std::io::stderr().flush()?;
 		let stdin = generator.generate()?;
-		let result = if let Some(interactor) = &interactor {
-			let (child_stdin, child_stdout, child) = args.language.run_interactee(&args.problem)?;
+		let result = if let Some(interactor) = args.interactive.as_ref() {
+			let (child_stdin, child_stdout, child) = args.language.run_interactee(&args.name)?;
 			args.language
 				.run_interacter(interactor, &stdin, child_stdin, child_stdout, child)?
 		} else {
-			args.language.run(&args.problem, &stdin)?
+			let (status, stdout) = args.language.run(&args.name, &stdin)?;
+			if let Some(name) = args.compare.as_ref() {
+				let (compare_status, compare_stdout) = args.language.run(name, &stdin)?;
+				let stdout_eq = stdout.split_whitespace().eq(compare_stdout.split_whitespace());
+				if !status {
+					eprintln!();
+					eprint!("Primary solver exited with non-zero code");
+				}
+				if !compare_status {
+					eprintln!();
+					eprint!("Secondary solver exited with non-zero code");
+				}
+				if status && compare_status && !stdout_eq {
+					eprintln!();
+					eprint!("Failed with different outputs");
+				}
+				status && compare_status && stdout_eq
+			}
+			else {
+				status
+			}
 		};
 		if !result {
 			eprintln!();
