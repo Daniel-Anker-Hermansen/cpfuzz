@@ -20,7 +20,7 @@ pub struct Args {
 	#[arg(short, long, value_name = "COMPARATOR", conflicts_with("interactive"))]
 	pub compare: Option<String>,
 
-	#[arg(short, long, value_name = "VERIFYER", conflicts_with("interactive"), conflicts_with("compare"))]
+	#[arg(short, long, value_name = "VERIFIER", conflicts_with("interactive"), conflicts_with("compare"))]
 	pub verify: Option<String>,
 }
 

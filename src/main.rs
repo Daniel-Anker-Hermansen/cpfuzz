@@ -119,49 +119,131 @@ impl Language {
 	}
 }
 
+enum Status {
+	Ok,
+	Failed,
+	PrimaryFailed,
+	SecondaryFailed,
+	VerifierFailed,
+	DifferentOutputs,
+}
+
+impl Status {
+	fn report(&self) {
+		let message = match self {
+			Status::Ok => "",
+			Status::Failed => "\nExited with non-zero exit code",
+			Status::PrimaryFailed => "\nPrimary exited with non-zero exit code",
+			Status::SecondaryFailed => "\nSecondery exited with non-zero exit code",
+			Status::VerifierFailed => "\nVerifier rejected the output",
+			Status::DifferentOutputs => "\nDifferent outputs",
+		};
+		eprint!("{message}");
+	}
+
+	fn failed(&self) -> bool {
+		!matches!(self, Status::Ok)
+	}
+}
+
+enum Runner {
+	Single { problem: String },
+	Compare { primary: String, secondary: String },
+	Interactive { problem: String, interactor: String },
+	Verify { problem: String, verifier: String },
+}
+
+impl Runner {
+	fn new(args: &args::Args) -> Result<Runner, Error> {
+		args.language.build(&args.name)?;
+		Ok(if let Some(interactor) = &args.interactive {
+			args.language.build(&interactor)?;
+			Runner::Interactive {
+				problem: args.name.clone(),
+				interactor: interactor.clone(),
+			}
+		} else if let Some(verifier) = &args.verify {
+			args.language.build(&verifier)?;
+			Runner::Verify {
+				problem: args.name.clone(),
+				verifier: verifier.clone(),
+			}
+		} else if let Some(comparator) = &args.compare {
+			args.language.build(&comparator)?;
+			Runner::Compare {
+				primary: args.name.clone(),
+				secondary: comparator.clone(),
+			}
+		} else {
+			Runner::Single {
+				problem: args.name.clone(),
+			}
+		})
+	}
+
+	fn run(&self, languge: &Language, stdin: &[u8]) -> Result<Status, Error> {
+		match self {
+			Runner::Single { problem } => {
+				let (status, _) = languge.run(problem, stdin)?;
+				Ok(if status { Status::Ok } else { Status::Failed })
+			}
+			Runner::Compare { primary, secondary } => {
+				let (primary_status, primary_out) = languge.run(primary, stdin)?;
+				let (secondary_status, secondary_out) = languge.run(secondary, stdin)?;
+				let stdout_ne = primary_out
+					.split_whitespace()
+					.ne(secondary_out.split_whitespace());
+				Ok(if !primary_status {
+					Status::PrimaryFailed
+				} else if !secondary_status {
+					Status::SecondaryFailed
+				} else if stdout_ne {
+					Status::DifferentOutputs
+				} else {
+					Status::Ok
+				})
+			}
+			Runner::Interactive {
+				problem,
+				interactor,
+			} => {
+				let (chid_stdin, child_stdout, process) = languge.run_interactee(&problem)?;
+				let status =
+					languge.run_interacter(interactor, stdin, chid_stdin, child_stdout, process)?;
+				Ok(if status { Status::Ok } else { Status::Failed })
+			}
+			Runner::Verify { problem, verifier } => {
+				let (problem_status, stdout) = languge.run(problem, stdin)?;
+				if !problem_status {
+					Ok(Status::Failed)
+				} else {
+					let mut new_stdin = stdin.to_vec();
+					new_stdin.push(b'\n');
+					new_stdin.extend_from_slice(stdout.as_bytes());
+					let (status, _) = languge.run(verifier, &new_stdin)?;
+					Ok(if status {
+						Status::Ok
+					} else {
+						Status::VerifierFailed
+					})
+				}
+			}
+		}
+	}
+}
+
 fn main() -> Result<(), Error> {
 	let args = args::Args::parse();
 	args.language.build(&args.name)?;
 	let generator = generator::Generator::new(&args)?;
-	if let Some(interactor) = args.interactive.as_ref() {
-		args.language.build(interactor)?;
-	}
-	if let Some(name) = args.compare.as_ref() {
-		args.language.build(name)?;
-	}
+	let runner = Runner::new(&args)?;
 	for _ in 1u64.. {
 		eprint!(".");
 		std::io::stderr().flush()?;
 		let stdin = generator.generate()?;
-		let result = if let Some(interactor) = args.interactive.as_ref() {
-			let (child_stdin, child_stdout, child) = args.language.run_interactee(&args.name)?;
-			args.language
-				.run_interacter(interactor, &stdin, child_stdin, child_stdout, child)?
-		} else {
-			let (status, stdout) = args.language.run(&args.name, &stdin)?;
-			if let Some(name) = args.compare.as_ref() {
-				let (compare_status, compare_stdout) = args.language.run(name, &stdin)?;
-				let stdout_eq = stdout
-					.split_whitespace()
-					.eq(compare_stdout.split_whitespace());
-				if !status {
-					eprintln!();
-					eprint!("Primary solver exited with non-zero code");
-				}
-				if !compare_status {
-					eprintln!();
-					eprint!("Secondary solver exited with non-zero code");
-				}
-				if status && compare_status && !stdout_eq {
-					eprintln!();
-					eprint!("Failed with different outputs");
-				}
-				status && compare_status && stdout_eq
-			} else {
-				status
-			}
-		};
-		if !result {
+		let result = runner.run(&args.language, &stdin)?;
+		if result.failed() {
+			result.report();
 			eprintln!();
 			std::io::stderr().write_all(&stdin)?;
 			eprintln!();
