@@ -17,8 +17,9 @@ impl Language {
 	fn build(self, problem: &str) -> io::Result<()> {
 		let (cmd, args): (&str, &[&str]) = match self {
 			Language::Rust => ("cargo", &["build", "--bin", problem, "--release"]),
-			Language::RustDebug => ("cargo", &["build", "--bin", problem, "--release"]),
+			Language::RustDebug => ("cargo", &["build", "--bin", problem]),
 			Language::Cpp => ("g++", &["-O2", &format!("{problem}.cpp"), "-o", problem]),
+			Language::CppSanitize => ("g++", &["-O2", "-g", "-fsanitize=address,undefined", &format!("{problem}.cpp"), "-o", problem]),
 		};
 		let exit_code = Command::new(cmd).args(args).spawn()?.wait()?;
 		if !exit_code.success() {
@@ -30,8 +31,9 @@ impl Language {
 	fn run(self, problem: &str, input: &[u8]) -> io::Result<(bool, String)> {
 		let path = match self {
 			Language::Rust => &format!("target/release/{problem}"),
-			Language::RustDebug => &format!("target/release/{problem}"),
+			Language::RustDebug => &format!("target/debug/{problem}"),
 			Language::Cpp => &format!("./{problem}"),
+			Language::CppSanitize => &format!("./{problem}"),
 		};
 		let mut child = Command::new(path)
 			.stdin(Stdio::piped())
@@ -57,6 +59,7 @@ impl Language {
 			Language::Rust => &format!("target/release/{problem}"),
 			Language::RustDebug => &format!("target/release/{problem}"),
 			Language::Cpp => &format!("./{problem}"),
+			Language::CppSanitize => &format!("./{problem}"),
 		};
 		let mut child = Command::new(path)
 			.stdin(Stdio::piped())
@@ -80,6 +83,7 @@ impl Language {
 			Language::Rust => &format!("target/release/{problem}"),
 			Language::RustDebug => &format!("target/release/{problem}"),
 			Language::Cpp => &format!("./{problem}"),
+			Language::CppSanitize => &format!("./{problem}"),
 		};
 		let mut child = Command::new(path)
 			.stdin(Stdio::piped())

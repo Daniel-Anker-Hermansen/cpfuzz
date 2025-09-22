@@ -3,6 +3,7 @@ pub enum Language {
 	Rust,
 	RustDebug,
 	Cpp,
+	CppSanitize,
 }
 
 #[derive(clap::Parser, Debug)]
