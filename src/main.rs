@@ -19,7 +19,7 @@ impl Language {
 			Language::Rust => ("cargo", &["build", "--bin", problem, "--release"]),
 			Language::RustDebug => ("cargo", &["build", "--bin", problem]),
 			Language::Cpp => ("g++", &["-O2", &format!("{problem}.cpp"), "-o", problem]),
-			Language::CppSanitize => ("g++", &["-O2", "-g", "-fsanitize=address,undefined", &format!("{problem}.cpp"), "-o", problem]),
+			Language::CppSanitize => ("g++", &["-g", "-fsanitize=address,undefined", &format!("{problem}.cpp"), "-o", problem]),
 		};
 		let exit_code = Command::new(cmd).args(args).spawn()?.wait()?;
 		if !exit_code.success() {
