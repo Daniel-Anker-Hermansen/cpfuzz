@@ -13,13 +13,38 @@ mod generator_bindings;
 use args::Language;
 use error::Error;
 
+trait IoResultExt {
+	fn ignore_broken_pipe(self) -> Self;
+}
+
+impl IoResultExt for io::Result<()> {
+	fn ignore_broken_pipe(self) -> Self {
+		match self {
+			Ok(()) => Ok(()),
+			Err(e) => match e.kind() {
+				io::ErrorKind::BrokenPipe => Ok(()),
+				_ => Err(e),
+			},
+		}
+	}
+}
+
 impl Language {
 	fn build(self, problem: &str) -> io::Result<()> {
 		let (cmd, args): (&str, &[&str]) = match self {
 			Language::Rust => ("cargo", &["build", "--bin", problem, "--release"]),
 			Language::RustDebug => ("cargo", &["build", "--bin", problem]),
 			Language::Cpp => ("g++", &["-O2", &format!("{problem}.cpp"), "-o", problem]),
-			Language::CppSanitize => ("g++", &["-g", "-fsanitize=address,undefined", &format!("{problem}.cpp"), "-o", problem]),
+			Language::CppSanitize => (
+				"g++",
+				&[
+					"-g",
+					"-fsanitize=address,undefined",
+					&format!("{problem}.cpp"),
+					"-o",
+					problem,
+				],
+			),
 		};
 		let exit_code = Command::new(cmd).args(args).spawn()?.wait()?;
 		if !exit_code.success() {
@@ -40,7 +65,12 @@ impl Language {
 			.stdout(Stdio::piped())
 			.stderr(Stdio::null())
 			.spawn()?;
-		child.stdin.as_mut().expect("is piped").write_all(input)?;
+		child
+			.stdin
+			.as_mut()
+			.expect("is piped")
+			.write_all(input)
+			.ignore_broken_pipe()?;
 		let mut stdout = Vec::new();
 		child
 			.stdout
@@ -92,7 +122,7 @@ impl Language {
 			.spawn()?;
 		let mut stdin = child.stdin.take().expect("is piped");
 		let mut stdout = child.stdout.take().expect("is piped");
-		stdin.write_all(input)?;
+		stdin.write_all(input).ignore_broken_pipe()?;
 		let child_in = std::thread::spawn(move || -> io::Result<()> {
 			let mut buf = [0; 512];
 			loop {
@@ -100,7 +130,7 @@ impl Language {
 				if n == 0 {
 					break;
 				}
-				child_stdin.write_all(&buf[..n])?;
+				child_stdin.write_all(&buf[..n]).ignore_broken_pipe()?;
 			}
 			Ok(())
 		});
@@ -111,7 +141,7 @@ impl Language {
 				if n == 0 {
 					break;
 				}
-				stdin.write_all(&buf[..n])?;
+				stdin.write_all(&buf[..n]).ignore_broken_pipe()?;
 			}
 			Ok(())
 		});
@@ -249,7 +279,7 @@ fn main() -> Result<(), Error> {
 		if result.failed() {
 			result.report();
 			eprintln!();
-			std::io::stderr().write_all(&stdin)?;
+			std::io::stderr().write_all(&stdin).ignore_broken_pipe()?;
 			eprintln!();
 			std::fs::write("fuzz.in", &stdin)?;
 			return Ok(());
