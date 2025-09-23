@@ -178,7 +178,7 @@ impl Generator {
 					.args([
 						&format!("{}.cpp", args.specification),
 						"-x",
-						"c",
+						"c++",
 						"-shared",
 						"-o",
 						"__cpfuzz_gen.so",
@@ -189,7 +189,7 @@ impl Generator {
 				write!(
 					&mut gcc.stdin.as_mut().unwrap(),
 					"{}",
-					include_str!("cpfuzz.c")
+					include_str!("cpfuzz.cpp")
 				)?;
 				let exit_code = gcc.wait()?;
 				if !exit_code.success() {
@@ -198,7 +198,7 @@ impl Generator {
 				let library = libloading::Library::new("./__cpfuzz_gen.so").unwrap();
 				let generator: unsafe fn(&mut Context) = std::mem::transmute(
 					library
-						.get::<unsafe fn(&Context)>(b"generate\0")
+						.get::<unsafe fn(&Context)>(b"__generate\0")
 						.unwrap()
 						.into_raw()
 						.into_raw(),
