@@ -24,8 +24,8 @@ impl ContextState {
 				break;
 			}
 			self.stdin.push(res);
-			self.stdin.push(b' ');
 		}
+		self.stdin.push(b' ');
 	}
 
 	pub fn into_stdin(self) -> Vec<u8> {
