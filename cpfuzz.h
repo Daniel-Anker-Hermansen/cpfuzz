@@ -19,5 +19,4 @@ void write_i64_seq(context_t *context, It first, It end) {
 	while (first != end) write_i64(context, *first), first++;
 }
 
-
 std::vector<i64> rand_i64_array(context_t *context, i64 length, i64 lower, i64 higher);
