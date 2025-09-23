@@ -1,5 +1,5 @@
 use std::{
-	io::{self, Read as _, Write},
+	io::{self, Read, Write},
 	process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
@@ -29,6 +29,16 @@ impl IoResultExt for io::Result<()> {
 	}
 }
 
+fn transfer(mut read: impl Read, mut write: impl Write) -> io::Result<()> {
+	let mut buf = [0; 512];
+	while let n = read.read(&mut buf)?
+		&& n > 0
+	{
+		write.write_all(&buf[..n]).ignore_broken_pipe()?;
+	}
+	Ok(())
+}
+
 impl Language {
 	fn build(self, problem: &str) -> io::Result<()> {
 		let (cmd, args): (&str, &[&str]) = match self {
@@ -53,18 +63,22 @@ impl Language {
 		Ok(())
 	}
 
-	fn run(self, problem: &str, input: &[u8]) -> io::Result<(bool, String)> {
+	fn spawn(self, problem: &str) -> io::Result<Child> {
 		let path = match self {
 			Language::Rust => &format!("target/release/{problem}"),
 			Language::RustDebug => &format!("target/debug/{problem}"),
 			Language::Cpp => &format!("./{problem}"),
 			Language::CppSanitize => &format!("./{problem}"),
 		};
-		let mut child = Command::new(path)
+		Command::new(path)
 			.stdin(Stdio::piped())
 			.stdout(Stdio::piped())
 			.stderr(Stdio::null())
-			.spawn()?;
+			.spawn()
+	}
+
+	fn run(self, problem: &str, input: &[u8]) -> io::Result<(bool, String)> {
+		let mut child = self.spawn(problem)?;
 		child
 			.stdin
 			.as_mut()
@@ -85,17 +99,7 @@ impl Language {
 	}
 
 	fn run_interactee(self, problem: &str) -> io::Result<(ChildStdin, ChildStdout, Child)> {
-		let path = match self {
-			Language::Rust => &format!("target/release/{problem}"),
-			Language::RustDebug => &format!("target/release/{problem}"),
-			Language::Cpp => &format!("./{problem}"),
-			Language::CppSanitize => &format!("./{problem}"),
-		};
-		let mut child = Command::new(path)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::null())
-			.spawn()?;
+		let mut child = self.spawn(problem)?;
 		let stdin = child.stdin.take().expect("is piped");
 		let stdout = child.stdout.take().expect("is piped");
 		Ok((stdin, stdout, child))
@@ -105,46 +109,16 @@ impl Language {
 		self,
 		problem: &str,
 		input: &[u8],
-		mut child_stdin: ChildStdin,
-		mut child_stdout: ChildStdout,
+		child_stdin: ChildStdin,
+		child_stdout: ChildStdout,
 		mut interactee: Child,
 	) -> io::Result<bool> {
-		let path = match self {
-			Language::Rust => &format!("target/release/{problem}"),
-			Language::RustDebug => &format!("target/release/{problem}"),
-			Language::Cpp => &format!("./{problem}"),
-			Language::CppSanitize => &format!("./{problem}"),
-		};
-		let mut child = Command::new(path)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::null())
-			.spawn()?;
+		let mut child = self.spawn(problem)?;
 		let mut stdin = child.stdin.take().expect("is piped");
-		let mut stdout = child.stdout.take().expect("is piped");
+		let stdout = child.stdout.take().expect("is piped");
 		stdin.write_all(input).ignore_broken_pipe()?;
-		let child_in = std::thread::spawn(move || -> io::Result<()> {
-			let mut buf = [0; 512];
-			loop {
-				let n = stdout.read(&mut buf)?;
-				if n == 0 {
-					break;
-				}
-				child_stdin.write_all(&buf[..n]).ignore_broken_pipe()?;
-			}
-			Ok(())
-		});
-		let child_out = std::thread::spawn(move || -> io::Result<()> {
-			let mut buf = [0; 512];
-			loop {
-				let n = child_stdout.read(&mut buf)?;
-				if n == 0 {
-					break;
-				}
-				stdin.write_all(&buf[..n]).ignore_broken_pipe()?;
-			}
-			Ok(())
-		});
+		let child_in = std::thread::spawn(|| transfer(stdout, child_stdin));
+		let child_out = std::thread::spawn(|| transfer(child_stdout, stdin));
 		child_in.join().expect("does not panic")?;
 		child_out.join().expect("does not panic")?;
 		let exit_code = child.wait()?;
@@ -190,20 +164,22 @@ enum Runner {
 impl Runner {
 	fn new(args: &args::Args) -> Result<Runner, Error> {
 		args.language.build(&args.name)?;
+		// Dear Bærbak, this if else switch is so beautiful, and nothing you ever have said
+		// or will ever say will convince me otherwise.
 		Ok(if let Some(interactor) = &args.interactive {
-			args.language.build(&interactor)?;
+			args.language.build(interactor)?;
 			Runner::Interactive {
 				problem: args.name.clone(),
 				interactor: interactor.clone(),
 			}
 		} else if let Some(verifier) = &args.verify {
-			args.language.build(&verifier)?;
+			args.language.build(verifier)?;
 			Runner::Verify {
 				problem: args.name.clone(),
 				verifier: verifier.clone(),
 			}
 		} else if let Some(comparator) = &args.compare {
-			args.language.build(&comparator)?;
+			args.language.build(comparator)?;
 			Runner::Compare {
 				primary: args.name.clone(),
 				secondary: comparator.clone(),
@@ -241,7 +217,7 @@ impl Runner {
 				problem,
 				interactor,
 			} => {
-				let (chid_stdin, child_stdout, process) = languge.run_interactee(&problem)?;
+				let (chid_stdin, child_stdout, process) = languge.run_interactee(problem)?;
 				let status =
 					languge.run_interacter(interactor, stdin, chid_stdin, child_stdout, process)?;
 				Ok(if status { Status::Ok } else { Status::Failed })
