@@ -1,8 +1,10 @@
 use std::{
 	io::{self, Read, Write},
 	process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+	sync::Mutex,
 };
 
+use ansi_term::Color;
 use clap::Parser as _;
 
 mod args;
@@ -29,11 +31,20 @@ impl IoResultExt for io::Result<()> {
 	}
 }
 
-fn transfer(mut read: impl Read, mut write: impl Write) -> io::Result<()> {
-	let mut buf = [0; 512];
+fn transfer(
+	mut read: impl Read,
+	mut write: impl Write,
+	transcript: &Mutex<Vec<(Party, Vec<u8>)>>,
+	party: Party,
+) -> io::Result<()> {
+	let mut buf = [0; 4096];
 	while let n = read.read(&mut buf)?
 		&& n > 0
 	{
+		transcript
+			.lock()
+			.expect("not poisened")
+			.push((party, buf[..n].to_vec()));
 		write.write_all(&buf[..n]).ignore_broken_pipe()?;
 	}
 	Ok(())
@@ -112,19 +123,38 @@ impl Language {
 		child_stdin: ChildStdin,
 		child_stdout: ChildStdout,
 		mut interactee: Child,
-	) -> io::Result<bool> {
+	) -> io::Result<Status> {
 		let mut child = self.spawn(problem)?;
 		let mut stdin = child.stdin.take().expect("is piped");
 		let stdout = child.stdout.take().expect("is piped");
 		stdin.write_all(input).ignore_broken_pipe()?;
-		let child_in = std::thread::spawn(|| transfer(stdout, child_stdin));
-		let child_out = std::thread::spawn(|| transfer(child_stdout, stdin));
-		child_in.join().expect("does not panic")?;
-		child_out.join().expect("does not panic")?;
+		let transcript = Mutex::new(Vec::new());
+		std::thread::scope(|scope| -> io::Result<()> {
+			let child_in =
+				scope.spawn(|| transfer(stdout, child_stdin, &transcript, Party::Interactee));
+			let child_out =
+				scope.spawn(|| transfer(child_stdout, stdin, &transcript, Party::Interactor));
+			child_in.join().expect("does not panic")?;
+			child_out.join().expect("does not panic")?;
+			Ok(())
+		})?;
 		let exit_code = child.wait()?;
 		let interactee_exit_code = interactee.wait()?;
-		Ok(exit_code.success() && interactee_exit_code.success())
+		let transcript = transcript.into_inner().expect("not poisoned");
+		if !exit_code.success() {
+			Ok(Status::InteractorFailed { transcript })
+		} else if !interactee_exit_code.success() {
+			Ok(Status::InteracteeFailed { transcript })
+		} else {
+			Ok(Status::Ok)
+		}
 	}
+}
+
+#[derive(Clone, Copy)]
+enum Party {
+	Interactor,
+	Interactee,
 }
 
 enum Status {
@@ -134,6 +164,8 @@ enum Status {
 	SecondaryFailed,
 	VerifierFailed,
 	DifferentOutputs,
+	InteractorFailed { transcript: Vec<(Party, Vec<u8>)> },
+	InteracteeFailed { transcript: Vec<(Party, Vec<u8>)> },
 }
 
 impl Status {
@@ -145,12 +177,28 @@ impl Status {
 			Status::SecondaryFailed => "\nSecondery exited with non-zero exit code",
 			Status::VerifierFailed => "\nVerifier rejected the output",
 			Status::DifferentOutputs => "\nDifferent outputs",
+			Status::InteractorFailed { .. } => "\nInteractor exited with non-zero exit code",
+			Status::InteracteeFailed { .. } => "\nInteractor exited with non-zero exit code",
 		};
 		eprint!("{message}");
 	}
 
 	fn failed(&self) -> bool {
 		!matches!(self, Status::Ok)
+	}
+
+	fn transcript(&self) {
+		if let Status::InteracteeFailed { transcript } | Status::InteractorFailed { transcript } =
+			self
+		{
+			for (party, data) in transcript {
+				let color = match party {
+					Party::Interactor => Color::Red,
+					Party::Interactee => Color::Blue,
+				};
+				print!("{}", color.paint(String::from_utf8_lossy(data)));
+			}
+		}
 	}
 }
 
@@ -218,9 +266,7 @@ impl Runner {
 				interactor,
 			} => {
 				let (chid_stdin, child_stdout, process) = languge.run_interactee(problem)?;
-				let status =
-					languge.run_interacter(interactor, stdin, chid_stdin, child_stdout, process)?;
-				Ok(if status { Status::Ok } else { Status::Failed })
+				Ok(languge.run_interacter(interactor, stdin, chid_stdin, child_stdout, process)?)
 			}
 			Runner::Verify { problem, verifier } => {
 				let (problem_status, stdout) = languge.run(problem, stdin)?;
@@ -257,6 +303,7 @@ fn main() -> Result<(), Error> {
 			eprintln!();
 			std::io::stderr().write_all(&stdin).ignore_broken_pipe()?;
 			eprintln!();
+			result.transcript();
 			std::fs::write("fuzz.in", &stdin)?;
 			return Ok(());
 		}
